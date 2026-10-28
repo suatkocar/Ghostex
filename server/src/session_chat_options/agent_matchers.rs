@@ -170,35 +170,33 @@ fn is_codex_model_id(token: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '-')
 }
 
-/// The model id a footer token names: the id itself (`gpt-6-sol`), or the
-/// display name Codex 0.156 prints instead (`GPT-6-Sol`), which is the id in
-/// upper case.
+/// The model a footer segment opens with, and the length of the label that named it.
 ///
-/// CDXC:AgentScreenDetection 2026-09-23 WHY:
-/// Codex 0.156 moved its footer from ids to display names, which made every
-/// Codex session's model unreadable. A display name only counts when its
-/// lower case is a Codex model in the live catalog, so a session titled
-/// "GPT-5.5" is still never read as a model, and a model pushed to the
-/// catalog is recognised without a release.
-fn codex_model_value(token: &str) -> Option<String> {
-    if is_codex_model_id(token) {
-        return Some(token.to_string());
+/// The label is resolved through the served catalog (`model_label_head`), which knows every string Codex paints a model with: its id, the name chat shows and the exact display name its footer prints. That display name is not the id — `GPT-6.1 Terra` is `gpt-6.1-terra`, with a space where the id has a hyphen. A build whose lineup gxserver could not read still names its model by id, which is accepted verbatim as before, and prose or a title that merely starts with a model name still fails the segment grammar below.
+/// SEE-ALSO: server/src/agent_model_catalog.rs model_label_head (why the id alone is not enough), server/src/session_chat_codex_picker.rs codex_row_model (the same identity for the model list's numbered rows, its reasoning title and its confirmation).
+fn codex_model_head(segment: &str) -> Option<(String, usize)> {
+    match crate::agent_model_catalog::model_label_head("codex", segment) {
+        Some(crate::agent_model_catalog::ModelLabelHead::Unique { value, length }) => {
+            return Some((value, length));
+        }
+        // Two catalog rows claim this name: the footer cannot say which one is running, so no model
+        // is read rather than the id fallback settling it.
+        Some(crate::agent_model_catalog::ModelLabelHead::Ambiguous) => return None,
+        None => {}
     }
-    let id = token.to_ascii_lowercase();
-    (token.starts_with("GPT-")
-        && is_codex_model_id(&id)
-        && crate::agent_model_catalog::catalog_model("codex", &id).is_some())
-    .then_some(id)
+    let token = segment.split(' ').next()?;
+    is_codex_model_id(token).then(|| (token.to_string(), token.len()))
 }
 
 pub(super) fn match_codex_segment(segment: &str) -> Option<SessionChatDetectedSelection> {
-    let mut tokens = segment.split(' ');
-    let label = tokens.next()?;
-    let model = codex_model_value(label)?;
+    let (model, length) = codex_model_head(segment)?;
+    let mut tokens = segment[length..]
+        .split(' ')
+        .filter(|token| !token.is_empty());
     let mut selection = SessionChatDetectedSelection {
         model: Some(SessionChatDetectedChoice {
             value: model,
-            label: label.to_string(),
+            label: segment[..length].to_string(),
             source: SessionChatOptionEvidence::Terminal,
         }),
         ..SessionChatDetectedSelection::default()

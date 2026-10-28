@@ -61,6 +61,13 @@ const CODEX_CURSOR: char = '\u{203a}';
 /// The reasoning lists' footer names this key since Codex 0.157 (`enter default · s session · esc back`).
 const CODEX_SESSION_KEY_HINT: &str = "s session";
 const CODEX_SESSION_KEY: &str = "s";
+/// What a select-only Codex list prints under it (`enter select · esc back`, its `/permissions`
+/// menu), against the reasoning list's `enter default`; the model list may only be answered with
+/// Enter when it says this, because the other key saves the pick as Codex's default. The model list's
+/// own hint is not measured yet (SK-154's live run proves it), which is why a list that does not say
+/// this refuses the pick instead of guessing.
+const CODEX_SELECT_ONLY_HINT: &str = "enter select";
+const CODEX_DEFAULT_HINT: &str = "enter default";
 /// CDXC:AgentScreenDetection 2026-09-28 WHY:
 /// What Codex adds to its change line when `s` applied the pick to this conversation alone. Codex 0.157 prints `for this session only` (`tui/src/app/model_defaults.rs`) while its conversation-default path still prints `for this conversation`; accepting only the older wording timed out every session-scoped pick after the change had already been applied.
 const CODEX_SESSION_CHANGED_SUFFIXES: [&str; 2] =
@@ -69,6 +76,10 @@ const CODEX_ARROW_UP: &str = "\u{1b}[A";
 const CODEX_ARROW_DOWN: &str = "\u{1b}[B";
 /// One press per row of the longest reasoning list, with slack.
 const CODEX_ROW_STEP_LIMIT: usize = 12;
+/// A hard stop for the model list's walk, far past the longest list Codex builds (the opencode-go
+/// lineup runs to about forty models); the walk itself ends when it comes back to the row it started
+/// on, so this only keeps a list that never moves from holding the send worker.
+const CODEX_LIST_STEP_LIMIT: usize = 64;
 const CODEX_ULTRA_CURSOR: char = '\u{00bb}';
 
 /// Typed as a bracketed paste; its list lives in session_chat_claude_model_list.rs.
@@ -192,16 +203,30 @@ fn screen_lines(screen: &str) -> Vec<String> {
         .collect()
 }
 
+/// The screen's lines with their own spacing kept. A picker row puts its label and its description
+/// in aligned columns, separated by two or more spaces, and collapsing them loses the only boundary
+/// between the two; the footer parsers want the collapsed form, picker rows do not.
+fn screen_lines_raw(screen: &str) -> Vec<String> {
+    screen
+        .split('\n')
+        .map(|line| crate::session_chat_options::strip_ansi_sgr(line).trim().to_string())
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PickerRow {
     number: u32,
-    /// The row text after `N.`, with the highlight marker removed.
+    /// The row text after `N.`, with the highlight marker removed and its spacing collapsed.
     text: String,
+    /// The label the row paints before its description, exactly as drawn: `GPT-6.1 Terra
+    /// (current)`. Matching a model by its whole label keeps `GPT-6.1 Terra EU` from being read as
+    /// `GPT-6.1 Terra`. Model lists only: a reasoning row is still compared through `text`.
+    label: String,
     /// Whether the highlight marker sits on this row.
     selected: bool,
 }
 
-/// `› 2. gpt-5.6-terra (current) Balanced agentic …` → number 2, text after the dot.
+/// `› 2. gpt-5.6-terra (current) Balanced agentic …` → number 2, the label and the text after the dot.
 fn parse_picker_row(line: &str) -> Option<PickerRow> {
     let selected = line.starts_with(CODEX_CURSOR);
     let rest = line
@@ -210,10 +235,15 @@ fn parse_picker_row(line: &str) -> Option<PickerRow> {
         .unwrap_or(line);
     let dot = rest.find(". ")?;
     let number = rest[..dot].parse::<u32>().ok()?;
-    let text = rest[dot + 2..].trim();
+    let drawn = rest[dot + 2..].trim();
+    // Codex lays a row out in aligned columns, so the label ends at the first run of two or more
+    // spaces and the description follows; a row drawn without one is its label alone.
+    let label = drawn.split("  ").next().unwrap_or_default().trim();
+    let text = collapse_spaces(drawn);
     (!text.is_empty()).then(|| PickerRow {
         number,
-        text: text.to_string(),
+        text,
+        label: label.to_string(),
         selected,
     })
 }
@@ -234,25 +264,36 @@ fn picker_rows_under(
 }
 
 fn model_picker_rows(screen: &str) -> Option<Vec<PickerRow>> {
-    picker_rows_under(&screen_lines(screen), |line| {
+    picker_rows_under(&screen_lines_raw(screen), |line| {
         line == CODEX_MODEL_PICKER_TITLE
     })
 }
 
 fn effort_picker_rows(screen: &str, model: &str) -> Option<Vec<PickerRow>> {
-    let expected = format!("{CODEX_EFFORT_PICKER_TITLE_PREFIX}{model}");
-    picker_rows_under(&screen_lines(screen), |line| {
-        line.eq_ignore_ascii_case(&expected)
+    picker_rows_under(&screen_lines_raw(screen), |line| {
+        codex_effort_title_names(line, model)
     })
+}
+
+/// `Select Reasoning Level for GPT-6.1 Terra` names `gpt-6.1-terra`: the title names the model the way the line prints it, which is not necessarily its id, so the whole name after the prefix is resolved through the same catalog identity as the footer and the numbered rows, and must be the model's.
+/// SEE-ALSO: server/src/session_chat_options/agent_matchers.rs codex_model_head.
+fn codex_effort_title_names(line: &str, model: &str) -> bool {
+    line.strip_prefix(CODEX_EFFORT_PICKER_TITLE_PREFIX)
+        .map(str::trim)
+        .and_then(|named| {
+            crate::agent_model_catalog::model_label_head("codex", named).filter(|head| {
+                matches!(head, crate::agent_model_catalog::ModelLabelHead::Unique { value, length } if value.as_str() == model && *length == named.len())
+            })
+        })
+        .is_some()
 }
 
 /// Whether the reasoning list for `model` offers Codex's session key; builds before 0.157 do not.
 fn effort_picker_offers_session(screen: &str, model: &str) -> bool {
-    let expected = format!("{CODEX_EFFORT_PICKER_TITLE_PREFIX}{model}");
     let lines = screen_lines(screen);
     lines
         .iter()
-        .rposition(|line| line.eq_ignore_ascii_case(&expected))
+        .rposition(|line| codex_effort_title_names(line, model))
         .is_some_and(|title| {
             lines[title + 1..]
                 .iter()
@@ -261,9 +302,25 @@ fn effort_picker_offers_session(screen: &str, model: &str) -> bool {
 }
 
 fn advanced_effort_picker_rows(screen: &str) -> Option<Vec<PickerRow>> {
-    picker_rows_under(&screen_lines(screen), |line| {
+    picker_rows_under(&screen_lines_raw(screen), |line| {
         line == CODEX_ADVANCED_REASONING_TITLE
     })
+}
+
+/// Whether the model list on this screen says Enter only selects, under the LAST model-list title
+/// (an earlier, already-answered list in scrollback must not speak for this one).
+///
+/// Its own Enter is the one key here that can write Codex's saved default, because the reasoning
+/// list under it uses the same key for `enter default`; a model row past 9 has no digit, so its
+/// Enter is only pressed when the list itself says it does not save.
+fn codex_model_list_selects_only(screen: &str) -> bool {
+    let lines = screen_lines(screen);
+    let Some(title) = lines.iter().rposition(|line| line == CODEX_MODEL_PICKER_TITLE) else {
+        return false;
+    };
+    let below = &lines[title + 1..];
+    below.iter().any(|line| line.contains(CODEX_SELECT_ONLY_HINT))
+        && !below.iter().any(|line| line.contains(CODEX_DEFAULT_HINT))
 }
 
 /// Claude's "Switch model?" or "Switch effort?" warning ("This conversation is cached for the
@@ -297,15 +354,15 @@ fn any_picker_open(screen: &str) -> bool {
         })
 }
 
-/// Whether a row's text is the model or effort label `wanted`: the label is
-/// the whole text, or the text continues with a space (` (current)`, ` (default)`,
-/// or the row's description).
+/// Whether a row's text is the reason level `wanted`: the label is the whole text, or the text
+/// continues with a space (` (default)`, or the row's description).
 ///
 /// CDXC:AgentScreenDetection 2026-09-24 WHY:
 /// Codex 0.156 lists display names (`GPT-6-Sol`) in its model picker and effort title while the
 /// catalog, the footer reader and the "Model changed to" line use ids (`gpt-6-sol`), so the label
 /// is compared without case. An exact match failed every Codex model change from chat.
-/// SEE-ALSO: server/src/session_chat_options/agent_matchers.rs codex_model_value.
+/// This compares a reason level by its own label; a model is compared by the catalog identity in
+/// `codex_row_model`, because a model's display name is not always its id.
 fn row_names(row: &PickerRow, wanted: &str) -> bool {
     row.text
         .get(..wanted.len())
@@ -314,6 +371,35 @@ fn row_names(row: &PickerRow, wanted: &str) -> bool {
             .chars()
             .next()
             .is_none_or(|next| next == ' ')
+}
+
+/// The label a model row is painted with, without Codex's `(current)`/`(default)` marker: the name
+/// a message can ask the person to pick, and the name `model_for_painted_name` matches.
+fn codex_painted_label(row: &PickerRow) -> &str {
+    row.label
+        .strip_suffix(" (current)")
+        .or_else(|| row.label.strip_suffix(" (default)"))
+        .unwrap_or(&row.label)
+        .trim()
+}
+
+/// The catalog model a numbered picker row names.
+///
+/// Codex prints the model's label there (`GPT-6.1 Terra (current)`), which is neither the catalog id (`gpt-6.1-terra`) nor the name chat shows (`GPT 6.1 Terra`); the marker is stripped and the whole label is matched against the catalog's own names. A row whose label is a longer model the catalog does not hold (`GPT-6.1 Terra EU`) therefore resolves to nothing instead of to the model whose name it starts with.
+///
+/// CDXC:AgentScreenDetection 2026-10-27 WHY:
+/// SK-154: the same-length prefix comparison this replaces read `GPT-6.1` off the row, found no model and refused the pick as unsupported, so the sent message stayed behind a failed selection. Refusing is kept for a label that is genuinely absent or that two rows claim.
+/// SEE-ALSO: server/src/session_chat_options/agent_matchers.rs codex_model_head.
+fn codex_row_model(row: &PickerRow) -> Option<String> {
+    crate::agent_model_catalog::model_for_painted_name("codex", codex_painted_label(row))
+}
+
+/// A capture's rows as a refusal names them: the label each row on screen is painted with, so the message names the models there without their descriptions. The first whitespace token used to be all a refusal printed, which showed `GPT-6.1` for `GPT-6.1 Terra` and made SK-154 look like a picker missing a model that was there.
+fn codex_picker_labels(rows: &[PickerRow]) -> String {
+    rows.iter()
+        .map(|row| row.label.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The label Codex paints for a catalog effort id.
@@ -331,7 +417,9 @@ fn effort_row_label(effort: &str) -> Option<&'static str> {
 }
 
 /// The keystroke that selects and confirms `row`. Codex's digit shortcut only
-/// covers single-digit rows, and no list Ghostex drives is longer than nine.
+/// covers single-digit rows; the model list is longer than that and is walked to and answered with
+/// Enter instead (`walk_codex_to_model`), while a reasoning row past 9 is refused, because there the
+/// Enter key saves the default and `s` is reached by the arrows only.
 fn row_key(row: &PickerRow, step: &str) -> Result<String, DomainStateError> {
     if (1..=9).contains(&row.number) {
         Ok(row.number.to_string())
@@ -346,20 +434,37 @@ fn row_key(row: &PickerRow, step: &str) -> Result<String, DomainStateError> {
     }
 }
 
-/// `• Model changed to gpt-6-luna low`, or with ` for this conversation` after a session pick,
-/// which is the only proof that `s` applied it without saving the default.
+/// `• Model changed to gpt-6-luna low`, or with ` for this session only`/` for this conversation`
+/// after a session pick, which is the only proof that `s` applied it without saving the default.
+///
+/// The model is read through the catalog identity, because the line names the model the way Codex prints it rather than by its id.
+/// SEE-ALSO: server/src/session_chat_options/agent_matchers.rs codex_model_head.
 fn changed_line_present(screen: &str, model: &str, effort: &str, session_only: bool) -> bool {
-    let expected = format!("{CODEX_MODEL_CHANGED_PREFIX}{model} {effort}");
     screen_lines(screen).iter().any(|line| {
         let rest = line
             .strip_prefix(CODEX_CURSOR)
             .map(str::trim_start)
             .unwrap_or(line);
-        rest.trim_start_matches(['•', ' '])
-            .strip_prefix(&expected)
-            .is_some_and(|tail| {
-                !session_only || CODEX_SESSION_CHANGED_SUFFIXES.contains(&tail.trim())
-            })
+        let Some(named) = rest
+            .trim_start_matches(['•', ' '])
+            .strip_prefix(CODEX_MODEL_CHANGED_PREFIX)
+        else {
+            return false;
+        };
+        let Some(crate::agent_model_catalog::ModelLabelHead::Unique {
+            value: changed,
+            length,
+        }) = crate::agent_model_catalog::model_label_head("codex", named)
+        else {
+            return false;
+        };
+        let tail = named[length..].trim();
+        let Some(suffix) = tail.strip_prefix(effort) else {
+            return false;
+        };
+        changed == model
+            && (suffix.is_empty() || suffix.starts_with(' '))
+            && (!session_only || CODEX_SESSION_CHANGED_SUFFIXES.contains(&suffix.trim()))
     })
 }
 
@@ -908,6 +1013,98 @@ impl PickerDriver<'_> {
         ))
     }
 
+    /// Walks Codex's highlight down its model list until the row it lands on names `model`, reading the list again after every press, and refuses when a whole cycle passes without that row.
+    ///
+    /// The list is taller than the screen and its digit shortcuts stop at row 9, so a model below the fold is in no capture at all and the arrows are the only way to it. Down moves the highlight one row and wraps from the last row to the first (`measured` 2026-10-27: 12 rows in an eight-row viewport, Down from 12 to row 1), so a walk that comes back to the row it started on has read every row and the model is genuinely absent; `CODEX_LIST_STEP_LIMIT` remains as the stop for a list that never moves.
+    ///
+    /// CDXC:AgentScreenDetection 2026-10-27 WHY:
+    /// SK-154: reading the visible rows once meant a model past the eighth could never be picked, and a row past 9 had no digit to answer it. Each press is still followed by a fresh capture, like every other step here, so a repaint cannot be mistaken for the row landing.
+    /// SEE-ALSO: server/src/session_chat_codex_picker.rs row_key (the digit shortcut).
+    async fn walk_codex_to_model(
+        &self,
+        step: &str,
+        model: &str,
+        rows: impl Fn(&str) -> Option<Vec<PickerRow>>,
+        mut captured: Vec<PickerRow>,
+    ) -> Result<PickerRow, DomainStateError> {
+        let mut start = None;
+        let mut presses = 0usize;
+        loop {
+            let landed = captured
+                .iter()
+                .find(|row| row.selected)
+                .ok_or_else(|| picker_timeout(step))?;
+            if codex_row_model(landed).as_deref() == Some(model) {
+                return Ok(landed.clone());
+            }
+            // Down wraps from the last row to the first, so coming back to the row the walk started
+            // on means every row has been read and the model is not in the list.
+            let from = landed.number;
+            if *start.get_or_insert(from) == from && presses > 0 {
+                return Err(unsupported_selection(format!(
+                    "Codex's model picker lists {}, not {model}.",
+                    codex_picker_labels(&captured)
+                )));
+            }
+            if presses >= CODEX_LIST_STEP_LIMIT {
+                // A list this long is not one Codex builds; refusing for good beats a retry loop
+                // that can never walk it.
+                return Err(unsupported_selection(format!(
+                    "Codex's model picker was too long to walk to {model}, so it was not changed."
+                )));
+            }
+            self.write(CODEX_ARROW_DOWN).await?;
+            captured = self
+                .wait_for(step, |screen| {
+                    rows(screen).filter(|rows| {
+                        rows.iter()
+                            .find(|row| row.selected)
+                            .is_some_and(|row| row.number != from)
+                    })
+                })
+                .await?;
+            presses += 1;
+        }
+    }
+
+    /// Answers a model row past 9, which has no digit shortcut, with Enter — but only after a fresh
+    /// capture proves two things: the wanted model is the row Codex has highlighted now, and the
+    /// list's own footer says Enter selects rather than saves (`enter select`, never
+    /// `enter default`). The reasoning list this opens is where the pick is applied, and its `s`
+    /// keeps it to the conversation.
+    ///
+    /// CDXC:AgentScreenDetection 2026-10-27 WHY:
+    /// SK-154: Enter is the one key that can write Codex's saved default from this list, so it is
+    /// never pressed on a screen that has not said what it does. A list whose footer says something
+    /// else (or nothing) refuses the pick instead; the message behind it then stays held, which is
+    /// what the queue gate already does for a refused selection.
+    async fn answer_codex_model_row_past_digits(
+        &self,
+        model: &str,
+    ) -> Result<(), DomainStateError> {
+        let screen = self.capture().await.ok_or_else(|| {
+            session_not_running(
+                "The session's screen could not be read, so the model was not changed.",
+            )
+        })?;
+        let highlighted = model_picker_rows(&screen)
+            .and_then(|rows| rows.into_iter().find(|row| row.selected));
+        let Some(selected) = highlighted
+            .filter(|row| codex_row_model(row).as_deref() == Some(model))
+        else {
+            return Err(unsupported_selection(
+                "Codex's model list changed before the model could be chosen, so Ghostex did not press Enter. Pick the model again.",
+            ));
+        };
+        if !codex_model_list_selects_only(&screen) {
+            return Err(unsupported_selection(format!(
+                "Codex's model list does not say Enter only selects, so Ghostex did not press it: that key can save the model as Codex's default. Choose {} in Codex's own /model list instead.",
+                codex_painted_label(&selected)
+            )));
+        }
+        self.write(CODEX_SUBMIT).await
+    }
+
     async fn drive(&self, plan: &CodexPickerPlan) -> Result<(), DomainStateError> {
         // Re-checked here, one instant before the first keystroke, because the
         // handler's check ran before this job reached the front of the queue.
@@ -967,18 +1164,26 @@ impl PickerDriver<'_> {
         self.write(CODEX_SUBMIT).await?;
 
         let model_rows = self.wait_for("open", model_picker_rows).await?;
-        let Some(model_row) = model_rows.iter().find(|row| row_names(row, &plan.model)) else {
-            let listed = model_rows
-                .iter()
-                .map(|row| row.text.split(' ').next().unwrap_or_default().to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(unsupported_selection(format!(
-                "Codex's model picker lists {listed}, not {}.",
-                plan.model
-            )));
+        // A row this capture shows with a digit is answered the proven way, in one keystroke.
+        // Anything else is walked to: Codex's model list is taller than the screen (12 rows in an
+        // eight-row viewport at 0.165.0) and its digits stop at 9.
+        let visible = model_rows
+            .iter()
+            .find(|row| codex_row_model(row).as_deref() == Some(plan.model.as_str()))
+            .filter(|row| row.number <= 9)
+            .cloned();
+        let model_row = match visible {
+            Some(row) => row,
+            None => {
+                self.walk_codex_to_model("model", &plan.model, model_picker_rows, model_rows)
+                    .await?
+            }
         };
-        self.write(&row_key(model_row, "model")?).await?;
+        if model_row.number <= 9 {
+            self.write(&row_key(&model_row, "model")?).await?;
+        } else {
+            self.answer_codex_model_row_past_digits(&plan.model).await?;
+        }
 
         let effort_label = effort_row_label(&plan.effort)
             .ok_or_else(|| invalid_params(format!("Unknown Codex effort {}.", plan.effort)))?;

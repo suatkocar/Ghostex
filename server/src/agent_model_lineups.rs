@@ -253,13 +253,18 @@ fn codex_lineup(output: &str) -> Option<Value> {
                 .get("additional_speed_tiers")
                 .and_then(Value::as_array)
                 .is_some_and(|tiers| tiers.iter().any(|tier| tier.as_str() == Some("fast")));
+            let display = model
+                .get("display_name")
+                .and_then(Value::as_str)
+                .unwrap_or(value);
             let mut row = json!({
                 "value": value,
-                "label": model
-                    .get("display_name")
-                    .and_then(Value::as_str)
-                    .unwrap_or(value)
-                    .replace('-', " "),
+                // The name chat shows, homed to the app's own style.
+                "label": display.replace('-', " "),
+                // The exact string Codex paints in its footer, model list and reasoning title,
+                // which hyphenates the version where the label has a space (`GPT-6.1 Terra`) and
+                // carries the hyphen of a profile's own naming (`GPT-6-Astra`).
+                "terminalLabels": [display],
                 "efforts": efforts,
                 "fastMode": fast,
             });
