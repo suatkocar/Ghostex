@@ -87,6 +87,9 @@ pub(crate) struct NativeChatView {
     /// Every disclosure that is opening, closing or folding, and the state each was last drawn in.
     /// A cell because rows drawn through `&self` report their state too.
     pub(super) disclosure_motion: std::cell::RefCell<super::disclosure_motion::DisclosureMotions>,
+    /// Whether the reader's place is held against new content (`reader_hold.rs`, the rule in
+    /// `ghostex_gx_chat_core::transcript::follow_policy`).
+    pub(super) reader_hold: ghostex_gx_chat_core::transcript::follow_policy::ReaderHold,
     /// True while a row of the subagent viewer's transcript renders, where a rewind would act on the wrong conversation.
     pub(super) in_subagent: bool,
     pub(super) context_editor_window: super::context_editor::ContextEditorWindowState,
@@ -339,6 +342,9 @@ impl NativeChatView {
                         chat.invoke(json!({"type":"composerExpand"}), cx);
                     }
                     chat.load_earlier_if_near_top(cx);
+                    // A wheel or trackpad gesture that reaches the end resumes following after a
+                    // released hold; gpui's list only re-arms its own Tail state.
+                    chat.note_scrolled_to_end();
                     let now = chat.transcript_scrolled_to_top();
                     if at_top.replace(now) != now
                         && let Some(app) = chat.config.app.as_ref().and_then(|app| app.upgrade())
@@ -392,6 +398,7 @@ impl NativeChatView {
             in_work_fold: false,
             hide_file_changes: false,
             disclosure_motion: Default::default(),
+            reader_hold: Default::default(),
             in_subagent: false,
             maximized_window: None,
             maximized_wanted: false,
@@ -826,8 +833,15 @@ impl NativeChatView {
             .and_then(|output| output.remove("rowDetails"))
         {
             self.row_details = details;
-            self.list.remeasure();
-            self.subagent_list.remeasure();
+            // CDXC:SessionChat 2026-10-27 WHY: `remeasure` re-anchors the row at the viewport's top
+            // proportionally, so a row partly scrolled off it moves the reader by the fraction of
+            // whatever that row grew: the same rule the 2026-09-26 disclosure decision rejected
+            // (`disclosure_anchor.rs`). Row details change on streaming frames, so the reader who is
+            // reading a reply's top drifted with every one of them. Pixels keep the row where it is.
+            let transcript = self.list.item_count();
+            self.list.remeasure_items(0..transcript);
+            let subagent = self.subagent_list.item_count();
+            self.subagent_list.remeasure_items(0..subagent);
             self.notify_if_shown(cx);
         }
         if let Some(mut snapshot) = output

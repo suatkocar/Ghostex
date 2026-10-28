@@ -108,6 +108,12 @@ impl NativeChatView {
         }
         cx.emit(super::state::NativeChatEvent::DraftState(true));
         self.invoke(submission, cx);
+        // CDXC:SessionChat 2026-10-27 DECISION:
+        // User (Q192): "Yukarı kaymışken kendi mesajımı gönderince sohbet en alta inecek." A message
+        // he sends himself takes the chat to its tail; every other arrival keeps his place
+        // (reader_hold.rs). Answering a question form inside the transcript still holds, until the
+        // live check says that send should go down too.
+        self.reader_asked_for_bottom();
     }
 
     /// The chat's neutral filled text button (Load earlier turns, Retry, Use / Dismiss, the

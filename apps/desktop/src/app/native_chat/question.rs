@@ -199,7 +199,11 @@ impl NativeChatView {
                 self.answer_subscription = Some(cx.subscribe_in(&input,window,|this,input,event:&InputEvent,window,cx| match event {
                     InputEvent::Change => this.invoke(json!({"type":"questionText","text":input.read(cx).value().to_string()}),cx),
                     InputEvent::PressEnter { shift:false,.. } => this.invoke(json!({"type":"questionNext"}),cx),
-                    InputEvent::Focus => super::focus::reclaim_keyboard_focus(window),
+                    InputEvent::Focus => {
+                        super::focus::reclaim_keyboard_focus(window);
+                        // Answering a card is reading inside a block: new content waits.
+                        this.hold_reader_place(cx);
+                    }
                     _=>{},
                 }));
                 self.answer_input = Some((key, input));

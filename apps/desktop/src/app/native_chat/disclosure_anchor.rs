@@ -5,6 +5,7 @@
 //! Two things moved the header. The toggles remeasured the whole list with gpui's proportional anchor, which keeps the top row's offset as a fraction of its height, so a long row partly scrolled off the top pushed the reader deep into what it grew; the remeasure now keeps pixels. And a transcript following its tail pins the bottom, so a body growing below the header pushed the header up and away; following pauses for the motion and is handed back afterwards, re-engaging only once the reader is at the bottom again. The one toggle whose revealed rows appear above it ("+N previous tool calls") scrolls by exactly what they grew, so it stays put too.
 
 use super::state::NativeChatView;
+use ghostex_gx_chat_core::transcript::follow_policy::ReaderHold;
 use gpui::{FollowMode, Window, px};
 
 impl NativeChatView {
@@ -81,11 +82,15 @@ impl NativeChatView {
                 // until the reader is back at the bottom, where the list re-engages on its own. A
                 // reader still at the bottom keeps following, so rows arriving with this frame
                 // are not left below the fold.
-                let top = self.list.logical_scroll_top();
-                let at_bottom = !super::scroll_bottom::transcript_left_bottom(&self.list);
-                self.list.set_follow_mode(FollowMode::Tail);
-                if !at_bottom {
-                    self.list.scroll_to(top);
+                //
+                // A held place stays held (reader_hold.rs): the hand-back is not the reader's ask.
+                if self.reader_hold == ReaderHold::Nothing {
+                    let top = self.list.logical_scroll_top();
+                    let at_bottom = !super::scroll_bottom::transcript_left_bottom(&self.list);
+                    self.list.set_follow_mode(FollowMode::Tail);
+                    if !at_bottom {
+                        self.list.scroll_to(top);
+                    }
                 }
             }
         }

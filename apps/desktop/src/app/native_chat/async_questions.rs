@@ -215,6 +215,8 @@ impl NativeChatView {
                     }
                     InputEvent::Focus => {
                         super::focus::reclaim_keyboard_focus(window);
+                        // Answering is reading inside a block: new content waits (reader_hold.rs).
+                        this.hold_reader_place(cx);
                         cx.notify();
                     }
                     InputEvent::Blur => cx.notify(),

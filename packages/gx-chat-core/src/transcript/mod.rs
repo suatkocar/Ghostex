@@ -18,6 +18,7 @@ pub mod file_changes;
 pub mod file_paths;
 pub mod file_position;
 pub mod files_links;
+pub mod follow_policy;
 pub mod foreign;
 pub mod image_markers;
 pub mod images;

@@ -63,6 +63,14 @@ pub fn answer_query(
         Query::SpeakableMarkdown => to_json(&crate::read_aloud::speakable_segments(
             first.and_then(Value::as_str)?,
         )),
+        Query::FollowTail => to_json(&crate::transcript::follow_policy::follows_tail(
+            if arguments.first().and_then(Value::as_bool).unwrap_or(false) {
+                crate::transcript::follow_policy::ReaderHold::InTranscript
+            } else {
+                crate::transcript::follow_policy::ReaderHold::Nothing
+            },
+            arguments.get(1).and_then(Value::as_bool).unwrap_or(false),
+        )),
         Query::TranscriptPictures => to_json(&crate::transcript::pictures::picture_gallery(
             state.transcript_view.items.iter(),
             first?,
@@ -156,6 +164,9 @@ pub enum Query {
     /// `transcriptPictures(picture)`: every picture the transcript shows, opened on this one
     /// (`{images, index}`), for the picture viewer's next and previous.
     TranscriptPictures,
+    /// `followTail(held, atBottom)`: whether new content may move the transcript's viewport, so the
+    /// phone asks the one rule instead of keeping its own copy (`transcript/follow_policy.rs`).
+    FollowTail,
 }
 
 impl Query {
@@ -173,6 +184,7 @@ impl Query {
             Self::SpeakableSegments => "speakableSegments",
             Self::SpeakableMarkdown => "speakableMarkdown",
             Self::TranscriptPictures => "transcriptPictures",
+            Self::FollowTail => "followTail",
         }
     }
 
@@ -190,6 +202,7 @@ impl Query {
             "speakableSegments" => Self::SpeakableSegments,
             "speakableMarkdown" => Self::SpeakableMarkdown,
             "transcriptPictures" => Self::TranscriptPictures,
+            "followTail" => Self::FollowTail,
             _ => return None,
         })
     }

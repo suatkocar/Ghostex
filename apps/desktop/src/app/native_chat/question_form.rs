@@ -183,7 +183,11 @@ impl NativeChatView {
                 InputEvent::PressEnter {
                     secondary: true, ..
                 } => this.invoke(json!({"type":"formSend","form":form_id}), cx),
-                InputEvent::Focus => super::focus::reclaim_keyboard_focus(window),
+                InputEvent::Focus => {
+                    super::focus::reclaim_keyboard_focus(window);
+                    // Typing in a form is reading inside a block: new content waits (reader_hold.rs).
+                    this.hold_reader_place(cx);
+                }
                 _ => {}
             },
         );

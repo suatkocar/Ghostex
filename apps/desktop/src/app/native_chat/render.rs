@@ -102,6 +102,9 @@ impl Render for NativeChatView {
         self.sync_session_details(&p, window, cx);
         self.hold_text_width_while_sliding(&p);
         self.sync_search_scroll();
+        // A scrollbar drag ends a hold: in a narrow pane the bar overlays the transcript, so the
+        // press that grabs it lands inside the list and would otherwise hold all by itself.
+        self.release_hold_for_scrollbar_drag();
         self.sync_files_links_jump();
         self.sync_open_question_jump(window);
         self.sync_question_ping(window, cx);
@@ -228,8 +231,19 @@ impl Render for NativeChatView {
                 |chat, event: &gpui::MouseDownEvent, window, cx| {
                     super::focus::reclaim_keyboard_focus(window);
                     chat.note_short_pane_composer_press(event.position, cx);
+                    // CDXC:SessionChat 2026-10-27 SEE-ALSO: a press is where a hold starts and ends
+                    // (reader_hold.rs, the rule in gx-chat-core's transcript/follow_policy.rs).
+                    let transcript = chat.list.viewport_bounds();
+                    chat.note_chat_press(transcript.contains(&event.position), cx);
                 },
             ))
+            // A press in another pane, the sidebar or the Session details dock leaves the
+            // transcript; `capture_any_mouse_down` above only sees presses over this pane.
+            .on_mouse_down_out(cx.listener(|chat, _: &gpui::MouseDownEvent, _window, cx| {
+                if chat.release_reader_place() {
+                    cx.notify();
+                }
+            }))
             .capture_action(cx.listener(Self::scroll_bottom_action))
             .capture_action(cx.listener(Self::open_search_action))
             .capture_action(cx.listener(Self::chat_zoom_in_action))
